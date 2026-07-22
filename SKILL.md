@@ -26,12 +26,14 @@ State is kept in:
 
 1. Read local `deploy.env`, if it exists.
 2. Detect recommended defaults from the local project.
-3. On first configuration, ask every deploy field with recommended defaults prefilled.
-4. Send the resolved values to the remote script.
-5. Remote script validates remote state before mutating anything.
-6. If local and remote state diverge, stop and report; never auto-repair.
-7. If state is consistent, clone or update the repo, generate `Dockerfile.deploy`, generate Compose, and run `docker compose`.
-8. After success, sync remote `deploy.env` back into the project root.
+3. Always show a numbered confirmation of every deploy variable before remote execution.
+4. If local `deploy.env` exists, show the values read from it and let the user confirm or edit by item number.
+5. If local `deploy.env` does not exist, show every required deploy variable with detected defaults where available and let the user fill or edit them.
+6. Send the confirmed values to the remote script.
+7. Remote script validates remote state before mutating anything.
+8. If local and remote state diverge, stop and report; never auto-repair.
+9. If state is consistent, clone or update the repo, generate `Dockerfile.deploy`, generate Compose, and run `docker compose`.
+10. After success, sync remote `deploy.env` back into the project root.
 
 ## Variables
 

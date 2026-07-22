@@ -61,7 +61,7 @@ Fluxo:
 
   1. Le ./deploy.env na raiz do projeto local, se existir.
   2. Detecta defaults de deploy a partir do projeto local.
-  3. Se for a primeira configuracao, pergunta tudo com valores sugeridos.
+  3. Sempre mostra uma revisao numerada das variaveis para confirmar ou editar.
   4. Executa /compose/script/deploy-full.sh no VPS.
   5. Baixa o deploy.env remoto para a pasta local apos sucesso.
 
@@ -87,7 +87,7 @@ Opcoes:
   --redetect                  Redetecta defaults locais
   --force-yml                 Permite sobrescrever Compose nao gerenciado
   --force-dockerfile          Permite sobrescrever Dockerfile nao gerenciado
-  --yes                       Nao pergunta; falha se faltar variavel obrigatoria
+  --yes                       Nao pergunta; usa valores salvos/detectados e falha se faltar variavel obrigatoria
   --dry-run                   Mostra plano sem mutar remoto nem local
   --help                      Mostra esta ajuda
 
@@ -428,28 +428,176 @@ env_is_configured() {
   return 0
 }
 
-review_first_time_configuration() {
-  log "Primeira configuracao do deploy. Revise os valores sugeridos."
+apply_config_defaults() {
+  PROJECT_NAME="${PROJECT_NAME:-$DETECTED_PROJECT_NAME}"
+  REPO_URL="${REPO_URL:-$DETECTED_REPO_URL}"
+  BRANCH="${BRANCH:-$DETECTED_BRANCH}"
+  TRAEFIK_NETWORK="${TRAEFIK_NETWORK:-$DETECTED_TRAEFIK_NETWORK}"
+  CERT_RESOLVER="${CERT_RESOLVER:-$DETECTED_CERT_RESOLVER}"
+  DEPLOY_STRATEGY="${DEPLOY_STRATEGY:-$DETECTED_DEPLOY_STRATEGY}"
+  RUNTIME="${RUNTIME:-$DETECTED_RUNTIME}"
+  INSTALL_COMMAND="${INSTALL_COMMAND:-$DETECTED_INSTALL_COMMAND}"
+  BUILD_COMMAND="${BUILD_COMMAND:-$DETECTED_BUILD_COMMAND}"
+  START_COMMAND="${START_COMMAND:-$DETECTED_START_COMMAND}"
+  DIST_DIR="${DIST_DIR:-$DETECTED_DIST_DIR}"
+  INTERNAL_PORT="${INTERNAL_PORT:-$DETECTED_INTERNAL_PORT}"
+  PERSISTENT_MOUNTS="${PERSISTENT_MOUNTS:-$DETECTED_PERSISTENT_MOUNTS}"
+}
 
-  ask_required_validated PROJECT_NAME "PROJECT_NAME" "${PROJECT_NAME:-$DETECTED_PROJECT_NAME}" validate_project_name_value "PROJECT_NAME invalido. Use minusculas, numeros, hifen e underscore."
-  ask_required_validated DOMAIN "DOMAIN" "${DOMAIN:-}" validate_domain_value "DOMAIN invalido. Nao use espacos nem crase."
-  ask_required REPO_URL "REPO_URL" "${REPO_URL:-$DETECTED_REPO_URL}"
-  ask_required BRANCH "BRANCH" "${BRANCH:-$DETECTED_BRANCH}"
-  ask_required TRAEFIK_NETWORK "TRAEFIK_NETWORK" "${TRAEFIK_NETWORK:-$DETECTED_TRAEFIK_NETWORK}"
-  ask_required CERT_RESOLVER "CERT_RESOLVER" "${CERT_RESOLVER:-$DETECTED_CERT_RESOLVER}"
-  ask_required_validated DEPLOY_STRATEGY "DEPLOY_STRATEGY (static|runtime)" "${DEPLOY_STRATEGY:-$DETECTED_DEPLOY_STRATEGY}" validate_strategy_value "DEPLOY_STRATEGY invalido. Use static ou runtime."
-  ask_required_validated RUNTIME "RUNTIME (node|python|custom)" "${RUNTIME:-$DETECTED_RUNTIME}" validate_runtime_value "RUNTIME invalido. Use node, python ou custom."
-  ask_required INSTALL_COMMAND "INSTALL_COMMAND" "${INSTALL_COMMAND:-$DETECTED_INSTALL_COMMAND}"
-  ask_optional BUILD_COMMAND "BUILD_COMMAND" "${BUILD_COMMAND:-$DETECTED_BUILD_COMMAND}"
-  if [[ "${DEPLOY_STRATEGY:-$DETECTED_DEPLOY_STRATEGY}" == "runtime" ]]; then
-    ask_required START_COMMAND "START_COMMAND" "${START_COMMAND:-$DETECTED_START_COMMAND}"
-    ask_optional DIST_DIR "DIST_DIR" "${DIST_DIR:-$DETECTED_DIST_DIR}"
-  else
-    ask_optional START_COMMAND "START_COMMAND" "${START_COMMAND:-$DETECTED_START_COMMAND}"
-    ask_required DIST_DIR "DIST_DIR" "${DIST_DIR:-$DETECTED_DIST_DIR}"
+config_key_by_number() {
+  case "$1" in
+    1) printf "PROJECT_NAME" ;;
+    2) printf "DOMAIN" ;;
+    3) printf "REPO_URL" ;;
+    4) printf "BRANCH" ;;
+    5) printf "TRAEFIK_NETWORK" ;;
+    6) printf "CERT_RESOLVER" ;;
+    7) printf "DEPLOY_STRATEGY" ;;
+    8) printf "RUNTIME" ;;
+    9) printf "INSTALL_COMMAND" ;;
+    10) printf "BUILD_COMMAND" ;;
+    11) printf "START_COMMAND" ;;
+    12) printf "DIST_DIR" ;;
+    13) printf "INTERNAL_PORT" ;;
+    14) printf "PERSISTENT_MOUNTS" ;;
+    *) return 1 ;;
+  esac
+}
+
+show_config_review() {
+  local source_label="valores sugeridos"
+  [[ "$ENV_FILE_EXISTS" == "true" ]] && source_label="valores lidos de $ENV_FILE e complementados com defaults"
+
+  log "Confirme as variaveis do deploy ($source_label):"
+  printf "  1. PROJECT_NAME=%s\n" "${PROJECT_NAME:-}"
+  printf "  2. DOMAIN=%s\n" "${DOMAIN:-}"
+  printf "  3. REPO_URL=%s\n" "${REPO_URL:-}"
+  printf "  4. BRANCH=%s\n" "${BRANCH:-}"
+  printf "  5. TRAEFIK_NETWORK=%s\n" "${TRAEFIK_NETWORK:-}"
+  printf "  6. CERT_RESOLVER=%s\n" "${CERT_RESOLVER:-}"
+  printf "  7. DEPLOY_STRATEGY=%s\n" "${DEPLOY_STRATEGY:-}"
+  printf "  8. RUNTIME=%s\n" "${RUNTIME:-}"
+  printf "  9. INSTALL_COMMAND=%s\n" "${INSTALL_COMMAND:-}"
+  printf "  10. BUILD_COMMAND=%s\n" "${BUILD_COMMAND:-}"
+  printf "  11. START_COMMAND=%s\n" "${START_COMMAND:-}"
+  printf "  12. DIST_DIR=%s\n" "${DIST_DIR:-}"
+  printf "  13. INTERNAL_PORT=%s\n" "${INTERNAL_PORT:-}"
+  printf "  14. PERSISTENT_MOUNTS=%s\n" "${PERSISTENT_MOUNTS:-}"
+}
+
+edit_config_item() {
+  local item_number="$1"
+  local key current_value new_value
+
+  key="$(config_key_by_number "$item_number")" || fail "Item invalido: $item_number"
+  current_value="${!key:-}"
+  read -r -p "$item_number. $key [$current_value]: " new_value
+  printf -v "$key" "%s" "${new_value:-$current_value}"
+}
+
+confirm_configuration() {
+  apply_config_defaults
+
+  if [[ "$YES" == "true" ]]; then
+    return 0
   fi
-  ask_required_validated INTERNAL_PORT "INTERNAL_PORT" "${INTERNAL_PORT:-$DETECTED_INTERNAL_PORT}" validate_port_value "INTERNAL_PORT deve ser numerico."
-  ask_optional PERSISTENT_MOUNTS "PERSISTENT_MOUNTS" "${PERSISTENT_MOUNTS:-$DETECTED_PERSISTENT_MOUNTS}"
+
+  while true; do
+    show_config_review
+    echo
+    echo "Pressione Enter para confirmar, digite o numero do item para editar, ou 'all' para revisar campo a campo."
+
+    local option=""
+    read -r -p "Opcao: " option
+    option="${option:-confirm}"
+
+    case "$option" in
+      confirm|c|C|s|S|sim|SIM|y|Y|yes|YES)
+        if configuration_is_complete; then
+          return 0
+        fi
+        echo
+        printf '%s\n' "Revise os itens acima antes de continuar." >&2
+        ;;
+      all|ALL|tudo|TUDO)
+        edit_config_item 1
+        edit_config_item 2
+        edit_config_item 3
+        edit_config_item 4
+        edit_config_item 5
+        edit_config_item 6
+        edit_config_item 7
+        edit_config_item 8
+        edit_config_item 9
+        edit_config_item 10
+        edit_config_item 11
+        edit_config_item 12
+        edit_config_item 13
+        edit_config_item 14
+        ;;
+      [1-9]|1[0-4])
+        edit_config_item "$option"
+        ;;
+      *)
+        printf '%s\n' "Opcao invalida." >&2
+        ;;
+    esac
+  done
+}
+
+configuration_is_complete() {
+  local valid="true"
+
+  if ! validate_project_name_value "${PROJECT_NAME:-}"; then
+    printf '%s\n' "PROJECT_NAME invalido. Use minusculas, numeros, hifen e underscore." >&2
+    valid="false"
+  fi
+  if ! validate_domain_value "${DOMAIN:-}"; then
+    printf '%s\n' "DOMAIN invalido. Nao use espacos nem crase." >&2
+    valid="false"
+  fi
+  if [[ -z "${REPO_URL:-}" ]]; then
+    printf '%s\n' "REPO_URL nao pode ficar vazio." >&2
+    valid="false"
+  fi
+  if [[ -z "${BRANCH:-}" ]]; then
+    printf '%s\n' "BRANCH nao pode ficar vazia." >&2
+    valid="false"
+  fi
+  if [[ -z "${TRAEFIK_NETWORK:-}" ]]; then
+    printf '%s\n' "TRAEFIK_NETWORK nao pode ficar vazia." >&2
+    valid="false"
+  fi
+  if [[ -z "${CERT_RESOLVER:-}" ]]; then
+    printf '%s\n' "CERT_RESOLVER nao pode ficar vazio." >&2
+    valid="false"
+  fi
+  if ! validate_strategy_value "${DEPLOY_STRATEGY:-}"; then
+    printf '%s\n' "DEPLOY_STRATEGY invalido. Use static ou runtime." >&2
+    valid="false"
+  fi
+  if ! validate_runtime_value "${RUNTIME:-}"; then
+    printf '%s\n' "RUNTIME invalido. Use node, python ou custom." >&2
+    valid="false"
+  fi
+  if [[ -z "${INSTALL_COMMAND:-}" ]]; then
+    printf '%s\n' "INSTALL_COMMAND nao pode ficar vazio." >&2
+    valid="false"
+  fi
+  if [[ "$DEPLOY_STRATEGY" == "runtime" && -z "${START_COMMAND:-}" ]]; then
+    printf '%s\n' "START_COMMAND e obrigatorio para DEPLOY_STRATEGY=runtime." >&2
+    valid="false"
+  fi
+  if [[ "$DEPLOY_STRATEGY" == "static" && -z "${DIST_DIR:-}" ]]; then
+    printf '%s\n' "DIST_DIR e obrigatorio para DEPLOY_STRATEGY=static." >&2
+    valid="false"
+  fi
+  if ! validate_port_value "${INTERNAL_PORT:-}"; then
+    printf '%s\n' "INTERNAL_PORT deve ser numerico." >&2
+    valid="false"
+  fi
+
+  [[ "$valid" == "true" ]]
 }
 
 validate_inputs() {
@@ -458,8 +606,11 @@ validate_inputs() {
   [[ "$DOMAIN" != *" "* ]] || fail "DOMAIN nao pode conter espacos."
   [[ -n "$REPO_URL" ]] || fail "REPO_URL nao pode ficar vazio."
   [[ -n "$BRANCH" ]] || fail "BRANCH nao pode ficar vazia."
+  [[ -n "$TRAEFIK_NETWORK" ]] || fail "TRAEFIK_NETWORK nao pode ficar vazia."
+  [[ -n "$CERT_RESOLVER" ]] || fail "CERT_RESOLVER nao pode ficar vazio."
   [[ "$DEPLOY_STRATEGY" =~ ^(static|runtime)$ ]] || fail "DEPLOY_STRATEGY invalido. Use static ou runtime."
   [[ "$RUNTIME" =~ ^(node|python|custom)$ ]] || fail "RUNTIME invalido. Use node, python ou custom."
+  [[ -n "$INSTALL_COMMAND" ]] || fail "INSTALL_COMMAND nao pode ficar vazio."
   [[ "$INTERNAL_PORT" =~ ^[0-9]+$ ]] || fail "INTERNAL_PORT deve ser numerico."
   if [[ "$DEPLOY_STRATEGY" == "runtime" && -z "$START_COMMAND" ]]; then
     fail "START_COMMAND e obrigatorio para DEPLOY_STRATEGY=runtime."
@@ -632,11 +783,7 @@ if [[ "$REDETECT" == "true" ]]; then
   PERSISTENT_MOUNTS="${PERSISTENT_MOUNTS:-$DETECTED_PERSISTENT_MOUNTS}"
 fi
 
-if [[ "$ENV_FILE_EXISTS" != "true" ]]; then
-  review_first_time_configuration
-elif ! env_is_configured; then
-  review_first_time_configuration
-fi
+confirm_configuration
 
 validate_inputs
 run_remote
