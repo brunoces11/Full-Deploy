@@ -1,0 +1,37 @@
+# managed-by: full-deploy-skill
+# version: v1
+# project: {{PROJECT_NAME}}
+# template: full-deploy.yml.tpl
+
+name: {{PROJECT_NAME}}
+
+services:
+  {{PROJECT_NAME}}:
+    build:
+      context: {{REPO_DIR}}
+      dockerfile: Dockerfile.deploy
+    image: {{IMAGE_NAME}}
+    container_name: {{PROJECT_NAME}}
+    restart: unless-stopped
+    networks:
+      - {{TRAEFIK_NETWORK}}
+    environment:
+      - NODE_ENV=production
+      - TZ=America/Sao_Paulo
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network={{TRAEFIK_NETWORK}}"
+      - "traefik.http.routers.{{PROJECT_NAME}}.rule=Host(`{{DOMAIN}}`)"
+      - "traefik.http.routers.{{PROJECT_NAME}}.entrypoints=web"
+      - "traefik.http.routers.{{PROJECT_NAME}}.service={{PROJECT_NAME}}"
+      - "traefik.http.routers.{{PROJECT_NAME}}-secure.rule=Host(`{{DOMAIN}}`)"
+      - "traefik.http.routers.{{PROJECT_NAME}}-secure.entrypoints=websecure"
+      - "traefik.http.routers.{{PROJECT_NAME}}-secure.tls=true"
+      - "traefik.http.routers.{{PROJECT_NAME}}-secure.tls.certresolver={{CERT_RESOLVER}}"
+      - "traefik.http.routers.{{PROJECT_NAME}}-secure.service={{PROJECT_NAME}}"
+      - "traefik.http.services.{{PROJECT_NAME}}.loadbalancer.server.port={{INTERNAL_PORT}}"
+{{VOLUMES_BLOCK}}
+
+networks:
+  {{TRAEFIK_NETWORK}}:
+    external: true
