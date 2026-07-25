@@ -5,7 +5,7 @@ SERVER_IP="185.215.165.130"
 COMPOSE_DIR="/compose"
 VOLUME_ROOT="/compose/volume"
 SKILL_ID="full-deploy-skill"
-SKILL_VERSION="v3"
+SKILL_VERSION="v4"
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 TEMPLATE_FILE="${DEPLOY_FULL_TEMPLATE:-$SCRIPT_DIR/deploy-full-template.yml}"
 CURL_IMAGE="${DEPLOY_FULL_CURL_IMAGE:-curlimages/curl:8.11.1}"
@@ -31,6 +31,7 @@ DIST_DIR=""
 INTERNAL_PORT=""
 PERSISTENT_MOUNTS=""
 APP_ENV_FILE=""
+DOCKERFILE_SOURCE="generated"
 PACKAGE_MANAGER=""
 SOURCE_COMMIT=""
 
@@ -58,14 +59,39 @@ validate_mounts() {
   [[ -z "$PERSISTENT_MOUNTS" ]] && return 0
   [[ "$PERSISTENT_MOUNTS" =~ ^[A-Za-z0-9._-]+:/[A-Za-z0-9._/-]+(,[A-Za-z0-9._-]+:/[A-Za-z0-9._/-]+)*$ && "$PERSISTENT_MOUNTS" != *..* ]] || fail "PERSISTENT_MOUNTS invalido."
 }
+normalize_mounts() {
+  [[ -z "$PERSISTENT_MOUNTS" ]] && return 0
+  local oldifs="$IFS" item clean subdir normalized="" sep=""
+  IFS=',' read -ra items <<< "$PERSISTENT_MOUNTS"
+  IFS="$oldifs"
+  for item in "${items[@]}"; do
+    [[ "$item" != *..* ]] || fail "PERSISTENT_MOUNTS invalido."
+    if [[ "$item" == *:* ]]; then
+      normalized+="$sep$item"
+    elif [[ "$item" == /* ]]; then
+      clean="${item%/}"
+      subdir="${clean##*/}"
+      [[ -n "$subdir" && "$subdir" =~ ^[A-Za-z0-9._-]+$ ]] || fail "PERSISTENT_MOUNTS absoluto nao pode apontar para raiz ou nome invalido."
+      normalized+="$sep$subdir:$clean"
+    else
+      fail "PERSISTENT_MOUNTS invalido."
+    fi
+    sep=","
+  done
+  PERSISTENT_MOUNTS="$normalized"
+}
 validate_config() {
   validate_project_name
   [[ "$DOMAIN" =~ ^[A-Za-z0-9.-]+$ && -n "$REPO_URL" && -n "$BRANCH" && -n "$TRAEFIK_NETWORK" && -n "$CERT_RESOLVER" ]] || fail "Configuracao de infraestrutura invalida."
   [[ "$DEPLOY_STRATEGY" =~ ^(static|runtime)$ ]] || fail "DEPLOY_STRATEGY deve ser static ou runtime."
-  [[ "$RUNTIME" =~ ^(node|python|custom)$ ]] || fail "RUNTIME invalido."
+  [[ "$RUNTIME" =~ ^(node|python|python-fastapi|custom)$ ]] || fail "RUNTIME invalido."
+  [[ "$DOCKERFILE_SOURCE" =~ ^(generated|project)$ ]] || fail "DOCKERFILE_SOURCE deve ser generated ou project."
+  [[ "$DOCKERFILE_SOURCE" != project || "$DEPLOY_STRATEGY" == runtime ]] || fail "DOCKERFILE_SOURCE=project e permitido apenas para runtime."
   validate_port
   [[ "$DEPLOY_STRATEGY" != runtime || -n "$START_COMMAND" ]] || fail "START_COMMAND e obrigatorio para runtime."
   [[ "$DEPLOY_STRATEGY" != static || -n "$DIST_DIR" ]] || fail "DIST_DIR e obrigatorio para static."
+  [[ "$RUNTIME" != python-fastapi || -n "$DIST_DIR" ]] || fail "DIST_DIR e obrigatorio para python-fastapi."
+  [[ "$RUNTIME" != python-fastapi || -n "$BUILD_COMMAND" || "$DOCKERFILE_SOURCE" == project ]] || fail "BUILD_COMMAND e obrigatorio para python-fastapi gerado."
   [[ "$DIST_DIR" != /* && "$DIST_DIR" != *..* ]] || fail "DIST_DIR deve ser relativo e sem '..'."
   validate_mounts
 }
@@ -83,8 +109,8 @@ remote_state_hash() {
   } | sha256_stdin
 }
 plan_payload() {
-  printf 'PROJECT_NAME=%s\nDOMAIN=%s\nREPO_URL=%s\nBRANCH=%s\nTRAEFIK_NETWORK=%s\nCERT_RESOLVER=%s\nDEPLOY_STRATEGY=%s\nRUNTIME=%s\nINSTALL_COMMAND=%s\nBUILD_COMMAND=%s\nSTART_COMMAND=%s\nDIST_DIR=%s\nINTERNAL_PORT=%s\nPERSISTENT_MOUNTS=%s\nAPP_ENV_FILE=%s\nSOURCE_COMMIT=%s\nREMOTE_STATE_HASH=%s\nFORCE_YML=%s\nFORCE_DOCKERFILE=%s\n' \
-    "$PROJECT_NAME" "$DOMAIN" "$REPO_URL" "$BRANCH" "$TRAEFIK_NETWORK" "$CERT_RESOLVER" "$DEPLOY_STRATEGY" "$RUNTIME" "$INSTALL_COMMAND" "$BUILD_COMMAND" "$START_COMMAND" "$DIST_DIR" "$INTERNAL_PORT" "$PERSISTENT_MOUNTS" "$APP_ENV_FILE" "$SOURCE_COMMIT" "$EXPECTED_REMOTE_STATE_HASH" "$FORCE_YML" "$FORCE_DOCKERFILE"
+  printf 'PROJECT_NAME=%s\nDOMAIN=%s\nREPO_URL=%s\nBRANCH=%s\nTRAEFIK_NETWORK=%s\nCERT_RESOLVER=%s\nDEPLOY_STRATEGY=%s\nRUNTIME=%s\nINSTALL_COMMAND=%s\nBUILD_COMMAND=%s\nSTART_COMMAND=%s\nDIST_DIR=%s\nINTERNAL_PORT=%s\nPERSISTENT_MOUNTS=%s\nAPP_ENV_FILE=%s\nDOCKERFILE_SOURCE=%s\nSOURCE_COMMIT=%s\nREMOTE_STATE_HASH=%s\nFORCE_YML=%s\nFORCE_DOCKERFILE=%s\n' \
+    "$PROJECT_NAME" "$DOMAIN" "$REPO_URL" "$BRANCH" "$TRAEFIK_NETWORK" "$CERT_RESOLVER" "$DEPLOY_STRATEGY" "$RUNTIME" "$INSTALL_COMMAND" "$BUILD_COMMAND" "$START_COMMAND" "$DIST_DIR" "$INTERNAL_PORT" "$PERSISTENT_MOUNTS" "$APP_ENV_FILE" "$DOCKERFILE_SOURCE" "$SOURCE_COMMIT" "$EXPECTED_REMOTE_STATE_HASH" "$FORCE_YML" "$FORCE_DOCKERFILE"
 }
 plan_hash() { plan_payload | sha256_stdin; }
 
@@ -122,6 +148,7 @@ detect_package_manager() {
   else PACKAGE_MANAGER=custom; fi
 }
 generate_dockerignore() {
+  [[ "$DOCKERFILE_SOURCE" == project && -f "$CANDIDATE_REPO/Dockerfile.deploy.dockerignore" ]] && return 0
   cat > "$CANDIDATE_REPO/Dockerfile.deploy.dockerignore" <<'EOF'
 node_modules
 .git
@@ -136,9 +163,13 @@ __pycache__
 .DS_Store
 EOF
 }
-docker_base_image() { case "$RUNTIME" in node) printf node:22-alpine;; python) printf python:3.12-slim;; custom) printf debian:bookworm-slim;; esac; }
+docker_base_image() { case "$RUNTIME" in node) printf node:22-alpine;; python|python-fastapi) printf python:3.12-slim;; custom) printf debian:bookworm-slim;; esac; }
 generate_dockerfile() {
-  local base
+  if [[ "$DOCKERFILE_SOURCE" == project ]]; then
+    [[ -f "$CANDIDATE_REPO/Dockerfile.deploy" ]] || fail "DOCKERFILE_SOURCE=project exige Dockerfile.deploy no commit confirmado."
+    return 0
+  fi
+  local base py_requirements
   base="$(docker_base_image)"
   if [[ "$DEPLOY_STRATEGY" == static ]]; then
     cat > "$CANDIDATE_REPO/Dockerfile.deploy" <<EOF
@@ -178,6 +209,34 @@ ENV HOST=0.0.0.0
 EXPOSE $INTERNAL_PORT
 CMD $START_COMMAND
 EOF
+    if [[ "$RUNTIME" == python-fastapi ]]; then
+      py_requirements=""
+      [[ -f "$CANDIDATE_REPO/backend/requirements.txt" ]] && py_requirements="backend/requirements.txt"
+      [[ -z "$py_requirements" && -f "$CANDIDATE_REPO/requirements.txt" ]] && py_requirements="requirements.txt"
+      cat > "$CANDIDATE_REPO/Dockerfile.deploy" <<EOF
+# managed-by: $SKILL_ID
+# version: $SKILL_VERSION
+FROM node:22-alpine AS frontend
+WORKDIR /app
+COPY . .
+$( [[ -n "$INSTALL_COMMAND" ]] && printf 'RUN %s\n' "$INSTALL_COMMAND" )
+$( [[ -n "$BUILD_COMMAND" ]] && printf 'RUN %s\n' "$BUILD_COMMAND" )
+RUN test -f "/app/$DIST_DIR/index.html" || (echo "ERRO: o build hibrido deve conter $DIST_DIR/index.html" && exit 1)
+
+FROM python:3.12-slim
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+ENV PORT=$INTERNAL_PORT
+ENV HOST=0.0.0.0
+ENV FRONTEND_DIST_DIR=/app/$DIST_DIR
+WORKDIR /app
+COPY . .
+$( [[ -n "$py_requirements" ]] && printf 'RUN pip install --no-cache-dir -r %s\n' "$py_requirements" )
+COPY --from=frontend /app/$DIST_DIR /app/$DIST_DIR
+EXPOSE $INTERNAL_PORT
+CMD $START_COMMAND
+EOF
+    fi
   fi
 }
 volumes_block() {
@@ -186,7 +245,7 @@ volumes_block() {
   local index
   for index in "${!MOUNT_SUBDIRS[@]}"; do printf '      - %s/%s:%s\n' "$APP_DIR" "${MOUNT_SUBDIRS[$index]}" "${MOUNT_TARGETS[$index]}"; done
 }
-env_file_block() { [[ -n "$APP_ENV_FILE" ]] && printf '    env_file:\n      - %s\n' "$APP_ENV_FILE"; }
+env_file_block() { [[ -n "$APP_ENV_FILE" ]] && printf '    env_file:\n      - %s\n' "$APP_ENV_FILE"; return 0; }
 generate_compose() {
   local target="$1" repo="$2" content volumes envblock
   volumes="$(volumes_block)"
@@ -209,7 +268,7 @@ write_deploy_env() {
   {
     echo "# managed-by: $SKILL_ID"
     echo "# version: $SKILL_VERSION"
-    for key in PROJECT_NAME DOMAIN REPO_URL BRANCH TRAEFIK_NETWORK CERT_RESOLVER DEPLOY_STRATEGY RUNTIME INSTALL_COMMAND BUILD_COMMAND START_COMMAND DIST_DIR INTERNAL_PORT PERSISTENT_MOUNTS APP_ENV_FILE; do echo "$key=$(shell_quote "${!key}")"; done
+    for key in PROJECT_NAME DOMAIN REPO_URL BRANCH TRAEFIK_NETWORK CERT_RESOLVER DEPLOY_STRATEGY RUNTIME INSTALL_COMMAND BUILD_COMMAND START_COMMAND DIST_DIR INTERNAL_PORT PERSISTENT_MOUNTS APP_ENV_FILE DOCKERFILE_SOURCE; do echo "$key=$(shell_quote "${!key}")"; done
     echo "PACKAGE_MANAGER=$(shell_quote "$PACKAGE_MANAGER")"
     echo "IMAGE_NAME=$(shell_quote "$IMAGE_NAME")"
     echo "LAST_DEPLOY_AT=$(shell_quote "$now")"
@@ -276,7 +335,7 @@ healthcheck_public() {
 }
 activate_release() {
   assert_managed_or_forced "$COMPOSE_FILE" Compose "$FORCE_YML"
-  assert_managed_or_forced "$REPO_DIR/Dockerfile.deploy" Dockerfile.deploy "$FORCE_DOCKERFILE"
+  [[ "$DOCKERFILE_SOURCE" == project ]] || assert_managed_or_forced "$REPO_DIR/Dockerfile.deploy" Dockerfile.deploy "$FORCE_DOCKERFILE"
   mkdir -p "$BACKUPS_DIR" "$DEPLOY_DIR/releases"
   if [[ -f "$COMPOSE_FILE" ]]; then HAD_PREVIOUS_RELEASE=true; PREVIOUS_COMPOSE="$BACKUPS_DIR/$(basename "$COMPOSE_FILE").$(date +%Y%m%d-%H%M%S).bak"; cp -a "$COMPOSE_FILE" "$PREVIOUS_COMPOSE"; fi
   if [[ -d "$REPO_DIR" ]]; then PREVIOUS_REPO="$DEPLOY_DIR/releases/repo-$(date +%Y%m%d-%H%M%S)"; mv "$REPO_DIR" "$PREVIOUS_REPO"; fi
@@ -307,6 +366,7 @@ while [[ $# -gt 0 ]]; do
     --internal-port) INTERNAL_PORT="${2:-}"; shift 2;;
     --persistent-mounts|--mounts) PERSISTENT_MOUNTS="${2:-}"; shift 2;;
     --app-env-file) APP_ENV_FILE="${2:-}"; shift 2;;
+    --dockerfile-source) DOCKERFILE_SOURCE="${2:-}"; shift 2;;
     --force-yml) FORCE_YML=true; shift;;
     --force-dockerfile) FORCE_DOCKERFILE=true; shift;;
     --yes|-y|--dry-run|--redetect) fail "$1 foi removido. Use --plan e o hash confirmado.";;
@@ -317,6 +377,7 @@ done
 validate_project_name
 if [[ "$STATE_HASH_MODE" == true ]]; then [[ "$APPLY" == false ]] || fail "--state-hash nao pode aplicar."; printf 'REMOTE_STATE_HASH=%s\n' "$(remote_state_hash)"; exit 0; fi
 [[ "$APPLY" == true && -n "$CONFIRMED_PLAN_HASH" && -n "$EXPECTED_REMOTE_STATE_HASH" ]] || fail "Aplicacao exige hash de plano e hash de estado remoto."
+normalize_mounts
 validate_config
 [[ "$SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]] || fail "SOURCE_COMMIT invalido."
 PLAN_HASH="$(plan_hash)"

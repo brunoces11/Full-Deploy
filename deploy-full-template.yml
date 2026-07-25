@@ -1,5 +1,5 @@
 # managed-by: full-deploy-skill
-# version: v2
+# version: v4
 # project: {{PROJECT_NAME}}
 # template: full-deploy.yml.tpl
 

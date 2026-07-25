@@ -27,6 +27,20 @@ vite_plan="$(run_plan "$WORK_DIR/vite")"
 assert_contains "$vite_plan" 'DEPLOY_STRATEGY=static'
 assert_contains "$vite_plan" 'DIST_DIR=dist'
 
+mkdir -p "$WORK_DIR/hybrid/backend/app"
+printf 'export default {}\n' > "$WORK_DIR/hybrid/vite.config.ts"
+printf '{"devDependencies":{"vite":"latest"},"scripts":{"build":"vite build","start":"serve dist"}}\n' > "$WORK_DIR/hybrid/package.json"
+printf 'fastapi==0.124.4\nuvicorn[standard]==0.38.0\n' > "$WORK_DIR/hybrid/backend/requirements.txt"
+printf 'from fastapi import FastAPI\napp = FastAPI()\n' > "$WORK_DIR/hybrid/backend/app/main.py"
+printf 'FROM node:22-alpine AS frontend\nFROM python:3.12-slim AS runtime\n' > "$WORK_DIR/hybrid/Dockerfile.deploy"
+printf 'PERSISTENT_MOUNTS=/app/data\n' > "$WORK_DIR/hybrid/deploy.env"
+hybrid_plan="$(run_plan "$WORK_DIR/hybrid")"
+assert_contains "$hybrid_plan" 'DEPLOY_STRATEGY=runtime'
+assert_contains "$hybrid_plan" 'RUNTIME=python-fastapi'
+assert_contains "$hybrid_plan" 'DOCKERFILE_SOURCE=project'
+assert_contains "$hybrid_plan" 'START_COMMAND=uvicorn backend.app.main:app --host 0.0.0.0 --port 8000 --workers 1'
+assert_contains "$hybrid_plan" 'PERSISTENT_MOUNTS=data:/app/data'
+
 mkdir -p "$WORK_DIR/vinext-runtime"
 printf '{"dependencies":{"vinext":"latest"},"scripts":{"build":"vinext build","start":"vinext start"}}\n' > "$WORK_DIR/vinext-runtime/package.json"
 runtime_plan="$(run_plan "$WORK_DIR/vinext-runtime")"
@@ -51,7 +65,12 @@ if bash "$REMOTE" --apply --confirmed-plan-hash invalid --expected-remote-state-
   fail 'remote must reject a mismatched plan hash before any mutation'
 fi
 
+if bash "$REMOTE" --apply --confirmed-plan-hash invalid --expected-remote-state-hash absent --project test-app --domain example.test --repo-url https://example.test/repo.git --branch main --traefik-network traknet --cert-resolver le --deploy-strategy runtime --runtime python-fastapi --install 'npm ci' --build 'npm run build' --start 'uvicorn backend.app.main:app --host 0.0.0.0 --port 8000' --dist-dir dist --internal-port 8000 --dockerfile-source generated >/dev/null 2>&1; then
+  fail 'remote must accept python-fastapi syntax but reject the mismatched plan hash'
+fi
+
 grep -Fq 'test -f "/app/$DIST_DIR/index.html"' "$REMOTE" || fail 'static index.html build guard is missing'
 grep -Fq 'Dockerfile.deploy.dockerignore' "$REMOTE" || fail 'deploy-specific dockerignore is missing'
+grep -Fq 'RUNTIME" =~ ^(node|python|python-fastapi|custom)$' "$REMOTE" || fail 'python-fastapi runtime is missing'
 
 printf 'All full-deploy regression checks passed.\n'

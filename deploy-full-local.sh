@@ -20,7 +20,7 @@ REMOTE_STATE_HASH="absent"
 SOURCE_COMMIT=""
 EXPECTED_REMOTE_STATE_HASH=""
 
-CONFIG_KEYS=(PROJECT_NAME DOMAIN REPO_URL BRANCH TRAEFIK_NETWORK CERT_RESOLVER DEPLOY_STRATEGY RUNTIME INSTALL_COMMAND BUILD_COMMAND START_COMMAND DIST_DIR INTERNAL_PORT PERSISTENT_MOUNTS APP_ENV_FILE)
+CONFIG_KEYS=(PROJECT_NAME DOMAIN REPO_URL BRANCH TRAEFIK_NETWORK CERT_RESOLVER DEPLOY_STRATEGY RUNTIME INSTALL_COMMAND BUILD_COMMAND START_COMMAND DIST_DIR INTERNAL_PORT PERSISTENT_MOUNTS APP_ENV_FILE DOCKERFILE_SOURCE)
 for key in "${CONFIG_KEYS[@]}"; do
   printf -v "$key" '%s' ""
   printf -v "OVERRIDE_$key" '%s' ""
@@ -40,6 +40,7 @@ DETECTED_START_COMMAND=""
 DETECTED_DIST_DIR=""
 DETECTED_INTERNAL_PORT=""
 DETECTED_PERSISTENT_MOUNTS=""
+DETECTED_DOCKERFILE_SOURCE="generated"
 PROFILE_REASON="Nao foi possivel classificar o projeto com seguranca."
 ENV_EXAMPLE_KEYS=""
 
@@ -62,10 +63,11 @@ Opcoes:
   --ssh-target ALVO            Alias/host SSH (padrao: contabo-vps).
   --remote-dir DIR             Diretorio remoto da skill (padrao: /compose/script).
   --project, --domain, --repo, --branch, --network, --certresolver
-  --strategy static|runtime    --runtime node|python|custom
+  --strategy static|runtime    --runtime node|python|python-fastapi|custom
   --install CMD --build CMD --start CMD --dist DIR --internal-port PORTA
   --mounts LISTA               subdir:/app/path,other:/app/other
   --app-env-file CAMINHO       Arquivo remoto com segredos (nunca e copiado pelo wrapper).
+  --dockerfile-source generated|project
   --redetect                   Recalcula o perfil tecnico inteiro; mostra a diferenca no plano.
   --force-yml --force-dockerfile
 
@@ -102,6 +104,8 @@ package_json_query() { command -v node >/dev/null 2>&1 || return 1; node -e 'con
 package_has_script() { [[ -f package.json ]] && package_json_query "$1" && node -e 'const p=require("./package.json"); process.exit(p.scripts?.[process.argv[1]]?0:1)' "$1" 2>/dev/null; }
 package_uses() { [[ -f package.json ]] && package_json_query "$1"; }
 has_export_output() { local file; for file in next.config.js next.config.ts next.config.mjs; do [[ -f "$file" ]] && grep -Eq "output[[:space:]]*:[[:space:]]*['\"]export['\"]" "$file" && return 0; done; return 1; }
+has_vite_frontend() { [[ -f vite.config.js || -f vite.config.ts || -f vite.config.mjs ]] && package_uses "vite"; }
+has_fastapi_backend() { [[ -d backend ]] && grep -R -Eq 'FastAPI[[:space:]]*\(' backend 2>/dev/null && { [[ -f backend/requirements.txt ]] && grep -Eiq '^fastapi([=<>~ ]|$)' backend/requirements.txt || [[ -f pyproject.toml ]]; }; }
 
 detect_local_defaults() {
   DETECTED_PROJECT_NAME="$(basename "$PWD" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9_-' '-')"
@@ -110,7 +114,17 @@ detect_local_defaults() {
   DETECTED_TRAEFIK_NETWORK="traknet"; DETECTED_CERT_RESOLVER="le"
   ENV_EXAMPLE_KEYS="$(awk -F= '/^[A-Za-z_][A-Za-z0-9_]*=/{print $1}' .env.example 2>/dev/null | paste -sd, - || true)"
 
-  if [[ -f index.html && ! -f package.json ]]; then
+  if has_vite_frontend && has_fastapi_backend; then
+    DETECTED_DEPLOY_STRATEGY="runtime"; DETECTED_RUNTIME="python-fastapi"; DETECTED_DIST_DIR="dist"; DETECTED_INTERNAL_PORT="8000"
+    DETECTED_DOCKERFILE_SOURCE="generated"
+    [[ -f Dockerfile.deploy ]] && DETECTED_DOCKERFILE_SOURCE="project"
+    if [[ -f backend/alembic.ini ]]; then
+      DETECTED_START_COMMAND="alembic -c backend/alembic.ini upgrade head && uvicorn backend.app.main:app --host 0.0.0.0 --port 8000 --workers 1"
+    else
+      DETECTED_START_COMMAND="uvicorn backend.app.main:app --host 0.0.0.0 --port 8000 --workers 1"
+    fi
+    PROFILE_REASON="Projeto hibrido Vite + FastAPI: build do frontend em Node e runtime Python/ASGI. Use DOCKERFILE_SOURCE=project quando Dockerfile.deploy multi-stage ja existir."
+  elif [[ -f index.html && ! -f package.json ]]; then
     DETECTED_DEPLOY_STRATEGY="static"; DETECTED_RUNTIME="custom"; DETECTED_DIST_DIR="."; DETECTED_INTERNAL_PORT="80"
     PROFILE_REASON="HTML puro: index.html na raiz publicavel e nenhuma dependencia de runtime detectada."
   elif [[ -f vite.config.js || -f vite.config.ts || -f vite.config.mjs ]] && ! package_uses "vinext"; then
@@ -139,11 +153,11 @@ detect_local_defaults() {
     PROFILE_REASON="Projeto Node com script start: requer processo de runtime; confirme a porta."
   fi
 
-  if [[ "$DETECTED_RUNTIME" == node ]]; then
-    if [[ -f pnpm-lock.yaml ]]; then DETECTED_INSTALL_COMMAND="corepack enable && pnpm install --frozen-lockfile"; package_has_script build && DETECTED_BUILD_COMMAND="pnpm run build"; package_has_script start && DETECTED_START_COMMAND="pnpm start"
-    elif [[ -f yarn.lock ]]; then DETECTED_INSTALL_COMMAND="corepack enable && yarn install --frozen-lockfile"; package_has_script build && DETECTED_BUILD_COMMAND="yarn build"; package_has_script start && DETECTED_START_COMMAND="yarn start"
-    elif [[ -f package-lock.json ]]; then DETECTED_INSTALL_COMMAND="npm ci"; package_has_script build && DETECTED_BUILD_COMMAND="npm run build"; package_has_script start && DETECTED_START_COMMAND="npm run start"
-    else DETECTED_INSTALL_COMMAND="npm install"; package_has_script build && DETECTED_BUILD_COMMAND="npm run build"; package_has_script start && DETECTED_START_COMMAND="npm run start"; fi
+  if [[ "$DETECTED_RUNTIME" == node || "$DETECTED_RUNTIME" == python-fastapi ]]; then
+    if [[ -f pnpm-lock.yaml ]]; then DETECTED_INSTALL_COMMAND="corepack enable && pnpm install --frozen-lockfile"; package_has_script build && DETECTED_BUILD_COMMAND="pnpm run build"; [[ "$DETECTED_RUNTIME" == node ]] && package_has_script start && DETECTED_START_COMMAND="pnpm start"
+    elif [[ -f yarn.lock ]]; then DETECTED_INSTALL_COMMAND="corepack enable && yarn install --frozen-lockfile"; package_has_script build && DETECTED_BUILD_COMMAND="yarn build"; [[ "$DETECTED_RUNTIME" == node ]] && package_has_script start && DETECTED_START_COMMAND="yarn start"
+    elif [[ -f package-lock.json ]]; then DETECTED_INSTALL_COMMAND="npm ci"; package_has_script build && DETECTED_BUILD_COMMAND="npm run build"; [[ "$DETECTED_RUNTIME" == node ]] && package_has_script start && DETECTED_START_COMMAND="npm run start"
+    else DETECTED_INSTALL_COMMAND="npm install"; package_has_script build && DETECTED_BUILD_COMMAND="npm run build"; [[ "$DETECTED_RUNTIME" == node ]] && package_has_script start && DETECTED_START_COMMAND="npm run start"; fi
   elif [[ "$DETECTED_RUNTIME" == python ]]; then
     DETECTED_INSTALL_COMMAND="pip install -r requirements.txt"
     [[ -f main.py ]] && DETECTED_START_COMMAND="uvicorn main:app --host 0.0.0.0 --port 8000"
@@ -161,23 +175,47 @@ apply_detected_defaults() {
 }
 
 apply_redetection() {
-  local technical=(DEPLOY_STRATEGY RUNTIME INSTALL_COMMAND BUILD_COMMAND START_COMMAND DIST_DIR INTERNAL_PORT)
+  local technical=(DEPLOY_STRATEGY RUNTIME INSTALL_COMMAND BUILD_COMMAND START_COMMAND DIST_DIR INTERNAL_PORT DOCKERFILE_SOURCE)
   local key detected
   for key in "${technical[@]}"; do detected="DETECTED_$key"; printf -v "$key" '%s' "${!detected:-}"; done
 }
 
 apply_overrides() { local key override set; for key in "${CONFIG_KEYS[@]}"; do override="OVERRIDE_$key"; set="OVERRIDE_SET_$key"; [[ "${!set}" == true ]] && printf -v "$key" '%s' "${!override}"; done; return 0; }
 validate_port() { [[ "$1" =~ ^([1-9][0-9]{0,4})$ ]] && (( $1 <= 65535 )); }
+normalize_mounts() {
+  [[ -z "$PERSISTENT_MOUNTS" ]] && return 0
+  local oldifs="$IFS" item clean subdir normalized="" sep=""
+  IFS=',' read -ra items <<< "$PERSISTENT_MOUNTS"
+  IFS="$oldifs"
+  for item in "${items[@]}"; do
+    [[ "$item" != *..* ]] || fail "PERSISTENT_MOUNTS invalido."
+    if [[ "$item" == *:* ]]; then
+      normalized+="$sep$item"
+    elif [[ "$item" == /* ]]; then
+      clean="${item%/}"
+      subdir="${clean##*/}"
+      [[ -n "$subdir" && "$subdir" =~ ^[A-Za-z0-9._-]+$ ]] || fail "PERSISTENT_MOUNTS absoluto nao pode apontar para raiz ou nome invalido."
+      normalized+="$sep$subdir:$clean"
+    else
+      fail "PERSISTENT_MOUNTS invalido."
+    fi
+    sep=","
+  done
+  PERSISTENT_MOUNTS="$normalized"
+}
 validate_mounts() { [[ -z "$PERSISTENT_MOUNTS" ]] || [[ "$PERSISTENT_MOUNTS" =~ ^[A-Za-z0-9._-]+:/[A-Za-z0-9._/-]+(,[A-Za-z0-9._-]+:/[A-Za-z0-9._/-]+)*$ ]] || fail "PERSISTENT_MOUNTS invalido."; }
 validate_config() {
   [[ "$PROJECT_NAME" =~ ^[a-z0-9][a-z0-9_-]*$ ]] || fail "PROJECT_NAME invalido."
   [[ "$DOMAIN" =~ ^[A-Za-z0-9.-]+$ ]] || fail "DOMAIN invalido."
   [[ -n "$REPO_URL" && -n "$BRANCH" && -n "$TRAEFIK_NETWORK" && -n "$CERT_RESOLVER" ]] || fail "Preencha PROJECT_NAME, DOMAIN, REPO_URL, BRANCH, TRAEFIK_NETWORK e CERT_RESOLVER."
   [[ "$DEPLOY_STRATEGY" =~ ^(static|runtime)$ ]] || fail "Perfil desconhecido. Informe --strategy static|runtime; a skill nao adivinha."
-  [[ "$RUNTIME" =~ ^(node|python|custom)$ ]] || fail "RUNTIME invalido."
+  [[ "$RUNTIME" =~ ^(node|python|python-fastapi|custom)$ ]] || fail "RUNTIME invalido."
+  [[ "$DOCKERFILE_SOURCE" =~ ^(generated|project)$ ]] || fail "DOCKERFILE_SOURCE deve ser generated ou project."
+  [[ "$DOCKERFILE_SOURCE" != project || -f Dockerfile.deploy ]] || fail "DOCKERFILE_SOURCE=project exige Dockerfile.deploy na raiz do projeto."
   validate_port "$INTERNAL_PORT" || fail "INTERNAL_PORT deve estar entre 1 e 65535."
   [[ "$DEPLOY_STRATEGY" != runtime || -n "$START_COMMAND" ]] || fail "START_COMMAND e obrigatorio para runtime."
   [[ "$DEPLOY_STRATEGY" != static || -n "$DIST_DIR" ]] || fail "DIST_DIR e obrigatorio para static."
+  [[ "$DIST_DIR" != /* && "$DIST_DIR" != *..* ]] || fail "DIST_DIR deve ser relativo e sem '..'."
   validate_mounts
 }
 
@@ -220,17 +258,39 @@ show_plan() {
   printf '\nHASH DO PLANO: %s\n' "$hash"
   printf 'Depois da confirmacao explicita no chat, execute exatamente:\n  ./deploy-full-local.sh --confirmed-plan-hash %q --expected-remote-state-hash %q --source-commit %q' "$hash" "$REMOTE_STATE_HASH" "$SOURCE_COMMIT"
   local key option
-  for key in "${CONFIG_KEYS[@]}"; do option="--$(tr '[:upper:]_' '[:lower:]-' <<< "$key")"; printf ' %s %q' "$option" "${!key}"; done
+  for key in "${CONFIG_KEYS[@]}"; do option="$(option_for_key "$key")"; printf ' %s %q' "$option" "${!key}"; done
   [[ "$FORCE_YML" == true ]] && printf ' --force-yml'
   [[ "$FORCE_DOCKERFILE" == true ]] && printf ' --force-dockerfile'
   printf '\n'
 }
 
+option_for_key() {
+  case "$1" in
+    PROJECT_NAME) printf -- "--project";;
+    DOMAIN) printf -- "--domain";;
+    REPO_URL) printf -- "--repo";;
+    BRANCH) printf -- "--branch";;
+    TRAEFIK_NETWORK) printf -- "--network";;
+    CERT_RESOLVER) printf -- "--certresolver";;
+    DEPLOY_STRATEGY) printf -- "--strategy";;
+    RUNTIME) printf -- "--runtime";;
+    INSTALL_COMMAND) printf -- "--install";;
+    BUILD_COMMAND) printf -- "--build";;
+    START_COMMAND) printf -- "--start";;
+    DIST_DIR) printf -- "--dist";;
+    INTERNAL_PORT) printf -- "--internal-port";;
+    PERSISTENT_MOUNTS) printf -- "--mounts";;
+    APP_ENV_FILE) printf -- "--app-env-file";;
+    DOCKERFILE_SOURCE) printf -- "--dockerfile-source";;
+  esac
+}
+
 run_remote() {
-  local hash="$1" remote_cmd="./deploy-full.sh --apply --confirmed-plan-hash $(printf '%q' "$hash") --expected-remote-state-hash $(printf '%q' "$REMOTE_STATE_HASH") --source-commit $(printf '%q' "$SOURCE_COMMIT")"
+  local hash="$1"
+  local remote_cmd="./deploy-full.sh --apply --confirmed-plan-hash $(printf '%q' "$hash") --expected-remote-state-hash $(printf '%q' "$REMOTE_STATE_HASH") --source-commit $(printf '%q' "$SOURCE_COMMIT")"
   local key option
   for key in "${CONFIG_KEYS[@]}"; do
-    option="--$(tr '[:upper:]_' '[:lower:]-' <<< "$key")"
+    option="$(option_for_key "$key")"
     remote_cmd+=" $option $(printf '%q' "${!key}")"
   done
   [[ "$FORCE_YML" == true ]] && remote_cmd+=" --force-yml"
@@ -245,8 +305,8 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --plan) PLAN_ONLY=true; shift;; --print-config-json) PLAN_ONLY=true; PRINT_JSON=true; shift;; --offline) OFFLINE=true; shift;;
     --confirmed-plan-hash) CONFIRMED_PLAN_HASH="${2:-}"; shift 2;; --expected-remote-state-hash) EXPECTED_REMOTE_STATE_HASH="${2:-}"; shift 2;; --source-commit) SOURCE_COMMIT="${2:-}"; shift 2;; --env-file) ENV_FILE="${2:-}"; shift 2;; --ssh-target) SSH_TARGET="${2:-}"; shift 2;; --remote-dir) REMOTE_SCRIPT_DIR="${2:-}"; shift 2;;
-    --project|--domain|--repo|--branch|--network|--certresolver|--strategy|--runtime|--install|--build|--start|--dist|--internal-port|--mounts|--app-env-file)
-      case "$1" in --project) key=PROJECT_NAME;; --domain) key=DOMAIN;; --repo) key=REPO_URL;; --branch) key=BRANCH;; --network) key=TRAEFIK_NETWORK;; --certresolver) key=CERT_RESOLVER;; --strategy) key=DEPLOY_STRATEGY;; --runtime) key=RUNTIME;; --install) key=INSTALL_COMMAND;; --build) key=BUILD_COMMAND;; --start) key=START_COMMAND;; --dist) key=DIST_DIR;; --internal-port) key=INTERNAL_PORT;; --mounts) key=PERSISTENT_MOUNTS;; --app-env-file) key=APP_ENV_FILE;; esac
+    --project|--domain|--repo|--branch|--network|--certresolver|--strategy|--runtime|--install|--build|--start|--dist|--internal-port|--mounts|--app-env-file|--dockerfile-source)
+      case "$1" in --project) key=PROJECT_NAME;; --domain) key=DOMAIN;; --repo) key=REPO_URL;; --branch) key=BRANCH;; --network) key=TRAEFIK_NETWORK;; --certresolver) key=CERT_RESOLVER;; --strategy) key=DEPLOY_STRATEGY;; --runtime) key=RUNTIME;; --install) key=INSTALL_COMMAND;; --build) key=BUILD_COMMAND;; --start) key=START_COMMAND;; --dist) key=DIST_DIR;; --internal-port) key=INTERNAL_PORT;; --mounts) key=PERSISTENT_MOUNTS;; --app-env-file) key=APP_ENV_FILE;; --dockerfile-source) key=DOCKERFILE_SOURCE;; esac
       printf -v "OVERRIDE_$key" '%s' "${2:-}"; printf -v "OVERRIDE_SET_$key" '%s' true; shift 2;;
     --redetect) REDETECT=true; shift;; --force-yml) FORCE_YML=true; shift;; --force-dockerfile) FORCE_DOCKERFILE=true; shift;;
     --yes|-y|--dry-run) fail "$1 foi removido: use --plan, confirme no chat e reutilize --confirmed-plan-hash.";;
@@ -256,7 +316,7 @@ done
 
 load_local_env; detect_local_defaults
 [[ "$REDETECT" == true ]] && apply_redetection || apply_detected_defaults
-apply_overrides; validate_config
+apply_overrides; normalize_mounts; validate_config
 read_remote_state_hash
 resolve_source_commit
 
