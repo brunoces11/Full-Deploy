@@ -1,4 +1,4 @@
 interface:
   display_name: "Deploy Full"
-  short_description: "Universal VPS deploy via Docker + Traefik"
-  default_prompt: "Use $deploy-full to deploy this project to the VPS using deploy.env and Docker Compose."
+  short_description: "Docker + Traefik deploy for static, runtime, and hybrid apps"
+  default_prompt: "Use $deploy-full to deploy this project to the VPS using a confirmed deploy plan, Docker, Traefik, and any project Dockerfile.deploy when appropriate."
