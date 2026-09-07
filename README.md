@@ -1,47 +1,39 @@
 # Full Deploy VPS
 
-Skill agnóstica para automatizar deploys de produção em VPS com Docker + Traefik.
+An agnostic skill for automating production deployments to VPS environments with Docker + Traefik.
 
-Ela foi criada para tornar o fluxo de publicação de aplicações web mais determinístico, limpo, seguro e rápido, encaixando naturalmente em pipelines de desenvolvimento agile.
+It is designed to make web application publishing more deterministic, clean, secure, and fast, while adapting to different stacks, dependencies, and project architectures.
 
-## O Que Ela Faz
+## What It Does
 
-- Publica aplicações estáticas e dinâmicas em VPS.
-- Suporta runtimes Node, Python e stacks híbridos React/Vite + FastAPI.
-- Gera um plano imutável antes de qualquer alteração.
-- Fixa o commit exato que será implantado.
-- Sincroniza `.env` local com o VPS sem expor segredos no plano ou no comando.
-- Cria e valida um container candidato isolado antes de promover para produção.
-- Usa Docker + Traefik para build, roteamento, TLS e exposição pública.
-- Executa rollback automático se o healthcheck público falhar.
+- Deploys static and dynamic applications to a VPS.
+- Adapts the deployment flow to the technical profile of the project.
+- Supports different runtimes, dependencies, and application structures.
+- Generates an immutable deployment plan before making changes.
+- Pins the exact source commit that will be deployed.
+- Synchronizes the local `.env` file with the VPS without exposing secrets.
+- Builds and validates an isolated candidate container before promoting it to production.
+- Uses Docker + Traefik for build, routing, TLS, and public exposure.
+- Automatically rolls back if the public health check fails.
 
-## Filosofia
+## Philosophy
 
-Deploy não deve depender de sorte, memória ou passos manuais frágeis.
+Deployments should not depend on luck, memory, or fragile manual steps.
 
-O Full Deploy VPS transforma publicação remota em um processo reproduzível: planejar, confirmar, validar, ativar e verificar. Só depois de passar por esse fluxo a nova versão entra em produção.
+Full Deploy VPS turns remote publishing into a reproducible process: plan, confirm, validate, activate, and verify. Only after passing this flow does the new version reach production.
 
-## Fluxo
+## Flow
 
-1. A skill detecta o perfil da aplicação.
-2. Gera um plano de deploy com hash de confirmação.
-3. O usuário confirma explicitamente o plano.
-4. O código é clonado no commit fixado.
-5. O build é executado em ambiente controlado.
-6. Um container candidato é validado isoladamente.
-7. A versão é promovida para produção.
-8. O domínio público é verificado.
-9. Em caso de falha, a versão anterior é restaurada.
+1. The skill detects the application profile.
+2. It generates a deployment plan with a confirmation hash.
+3. The user explicitly confirms the plan.
+4. The code is cloned at the pinned commit.
+5. The build runs in a controlled environment.
+6. An isolated candidate container is validated.
+7. The release is promoted to production.
+8. The public domain is verified.
+9. If validation fails, the previous version is restored.
 
-## Perfis Suportados
+## Goal
 
-- HTML estático.
-- Vite/React estático.
-- Node runtime.
-- Python runtime.
-- React/Vite + FastAPI.
-- Dockerfile customizado do projeto.
-
-## Objetivo
-
-Reduzir atrito operacional, evitar deploys inconsistentes e dar previsibilidade ao ciclo de desenvolvimento, com uma camada de automação robusta para publicar aplicações reais em ambientes remotos.
+Reduce operational friction, prevent inconsistent deployments, and bring predictability to the development cycle through a robust automation layer for publishing real applications to remote environments.
